@@ -5,13 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/**
- * @title AOM3Vault
- * @notice Protocol for disciplined savings with delta-neutral yield strategies.
- */
+interface ILiminalVault {
+    function deposit(uint256 amount) external;
+}
+
 contract AOM3Vault is Ownable, ReentrancyGuard {
     IERC20 public usdc;
-    address public yieldStrategy; // Address ของ Liminal Vault
+    address public yieldStrategy; 
 
     struct QuestPlan {
         address owner;
@@ -20,6 +20,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         uint256 currentStreak;
         uint256 durationMonths;
         uint256 startTimestamp;
+        uint256 lastDepositTimestamp;
         bool active;
     }
 
@@ -35,68 +36,73 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         yieldStrategy = _yieldStrategy;
     }
 
-    /**
-     * @dev ตรวจสอบว่าปัจจุบันอยู่ในช่วง 1-7 วันแรกของเดือน (UTC) หรือไม่.
-     */
-    function isInsideWindow() public view returns (bool) {
-        uint256 day = (block.timestamp / 86400) % 31; 
-        return (day >= 0 && day < 7); 
+    function getDayOfMonth(uint256 timestamp) public pure returns (uint256) {
+        uint256 secondsInDay = 86400;
+        uint256 daysSinceEpoch = timestamp / secondsInDay;
+        return ((daysSinceEpoch + 3) % 31) + 1; 
     }
 
-    /**
-     * @dev สร้างภารกิจการออมใหม่ เลือกได้ 6, 12, หรือ 24 เดือน.
-     */
-    function createQuest(uint256 _monthlyAmount, uint256 _durationMonths) external {
+    function isInsideWindow() public view returns (bool) {
+        uint256 day = getDayOfMonth(block.timestamp);
+        return (day >= 1 && day <= 7); 
+    }
+
+    function createQuest(uint256 _monthlyAmount, uint256 _durationMonths) external nonReentrant {
         require(_durationMonths == 6 || _durationMonths == 12 || _durationMonths == 24, "Invalid duration");
-        
+        require(_monthlyAmount > 0, "Amount must be > 0");
+        require(usdc.transferFrom(msg.sender, address(this), _monthlyAmount), "First deposit failed");
+
         uint256 questId = nextQuestId++;
         quests[questId] = QuestPlan({
             owner: msg.sender,
             monthlyAmount: _monthlyAmount,
-            totalDeposited: 0,
-            currentStreak: 0,
+            totalDeposited: _monthlyAmount,
+            currentStreak: 1,
             durationMonths: _durationMonths,
             startTimestamp: block.timestamp,
+            lastDepositTimestamp: block.timestamp,
             active: true
         });
+
+        _forwardToStrategy(_monthlyAmount);
 
         emit QuestCreated(questId, msg.sender, _monthlyAmount);
     }
 
-    /**
-     * @dev ฝากเงินประจำเดือน หากอยู่นอกหน้าต่าง Streak จะถูกรีเซ็ตและ Yield จะถูกริบ.
-     */
     function deposit(uint256 _questId) external nonReentrant {
         QuestPlan storage quest = quests[_questId];
         require(quest.active, "Quest not active");
         require(msg.sender == quest.owner, "Not owner");
+        require(block.timestamp > quest.lastDepositTimestamp + 20 days, "Too soon for next deposit");
 
         uint256 amount = quest.monthlyAmount;
         require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
         bool inWindow = isInsideWindow();
-        
         if (inWindow) {
-            quest.currentStreak++; // เพิ่ม Streak เพื่อรับ PrizePoolBonus
+            quest.currentStreak++;
         } else {
-            quest.currentStreak = 0; // รีเซ็ต Streak หากผิดนัด
+            quest.currentStreak = 0;
         }
 
         quest.totalDeposited += amount;
-        
-        // ส่งเงินไปยังกลยุทธ์ Delta-Neutral Hedge
-        usdc.approve(yieldStrategy, amount);
+        quest.lastDepositTimestamp = block.timestamp;
+
+        _forwardToStrategy(amount);
         
         emit DepositExecuted(_questId, amount, inWindow);
     }
 
-    /**
-     * @dev ถอนเงินต้นคืนเมื่อภารกิจครบกำหนด.
-     */
+    function _forwardToStrategy(uint256 _amount) internal {
+        usdc.approve(yieldStrategy, _amount);
+        ILiminalVault(yieldStrategy).deposit(_amount);
+    }
+
     function withdraw(uint256 _questId) external nonReentrant {
         QuestPlan storage quest = quests[_questId];
         require(block.timestamp >= quest.startTimestamp + (quest.durationMonths * 30 days), "Not matured");
-        
+        require(msg.sender == quest.owner, "Not owner");
+
         uint256 amount = quest.totalDeposited;
         quest.active = false;
         
