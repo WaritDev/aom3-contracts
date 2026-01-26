@@ -9,6 +9,11 @@ interface ILiminalVault {
     function deposit(uint256 amount) external;
 }
 
+interface IAOM3Strategy {
+    function deposit(uint256 amount) external;
+    function redeemWithFee(uint256 totalAmount, uint256 feeAmount, address to) external;
+}
+
 contract AOM3Vault is Ownable, ReentrancyGuard {
     IERC20 public usdc;
     address public yieldStrategy; 
@@ -100,13 +105,19 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
 
     function withdraw(uint256 _questId) external nonReentrant {
         QuestPlan storage quest = quests[_questId];
-        require(block.timestamp >= quest.startTimestamp + (quest.durationMonths * 30 days), "Not matured");
         require(msg.sender == quest.owner, "Not owner");
+        require(quest.active, "Quest not active");
 
-        uint256 amount = quest.totalDeposited;
+        uint256 totalAmount = quest.totalDeposited;
+        uint256 penaltyFee = 0;
+
+        if (block.timestamp < quest.startTimestamp + (quest.durationMonths * 30 days)) {
+            penaltyFee = (totalAmount * 1000) / 10000;
+        }
+
         quest.active = false;
-        
-        require(usdc.transfer(msg.sender, amount), "Transfer failed");
-        emit WithdrawalExecuted(_questId, amount);
+        IAOM3Strategy(yieldStrategy).redeemWithFee(totalAmount, penaltyFee, msg.sender);
+
+        emit WithdrawalExecuted(_questId, totalAmount - penaltyFee);
     }
 }
