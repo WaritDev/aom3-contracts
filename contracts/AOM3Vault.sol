@@ -4,14 +4,21 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
 interface IAOM3Strategy {
     function deposit(uint256 amount) external;
     function redeemWithFee(uint256 totalAmount, uint256 feeAmount, address to) external;
 }
 
+interface IAOM3Ranking {
+    function registerNewQuest(address _user, uint256 _dp, uint256 _months) external;
+    function reduceActiveDP(address _user, uint256 _dp) external;
+}
+
 contract AOM3Vault is Ownable, ReentrancyGuard {
     IERC20 public usdc;
     address public yieldStrategy; 
+    IAOM3Ranking public ranking;
 
     struct QuestPlan {
         address owner;
@@ -30,18 +37,20 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     uint256 public totalDisciplinePoints;
 
     event QuestCreated(uint256 indexed questId, address indexed owner, uint256 amount, uint256 dp);
-    event DepositExecuted(uint256 indexed questId, uint256 amount, bool insideWindow);
+    event DepositExecuted(uint256 indexed questId, uint256 amount, bool insideWindow, uint256 bonusDP);
     event WithdrawalExecuted(uint256 indexed questId, uint256 amount, uint256 dpSubtracted);
 
-    constructor(address _usdc, address _yieldStrategy) Ownable(msg.sender) {
+    constructor(address _usdc, address _yieldStrategy, address _ranking) Ownable(msg.sender) {
         usdc = IERC20(_usdc);
         yieldStrategy = _yieldStrategy;
+        ranking = IAOM3Ranking(_ranking);
     }
 
     function getMultiplier(uint256 _months) public pure returns (uint256) {
-        if (_months == 3 || _months == 6) return 100;
-        if (_months == 12) return 120;
-        if (_months == 18) return 150;
+        if (_months == 3) return 100; 
+        if (_months == 6) return 120;
+        if (_months == 12) return 150;
+        if (_months == 18) return 180;
         if (_months == 24) return 200;
         revert("Invalid duration");
     }
@@ -59,7 +68,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         uint256 multiplier = getMultiplier(_durationMonths);
         require(_monthlyAmount > 0, "Amount must be > 0");
         require(usdc.transferFrom(msg.sender, address(this), _monthlyAmount), "First deposit failed");
-        uint256 questDP = (_monthlyAmount * multiplier) / 100;
+        uint256 questDP = (_monthlyAmount * _durationMonths * multiplier) / (100 * 1e6);
 
         uint256 questId = nextQuestId++;
         quests[questId] = QuestPlan({
@@ -75,9 +84,9 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         });
 
         totalDisciplinePoints += questDP;
+        ranking.registerNewQuest(msg.sender, questDP, _durationMonths);
 
         _forwardToStrategy(_monthlyAmount);
-
         emit QuestCreated(questId, msg.sender, _monthlyAmount, questDP);
     }
 
@@ -91,8 +100,14 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
         bool inWindow = isInsideWindow();
+        uint256 bonusDP = 0;
+
         if (inWindow) {
             quest.currentStreak++;
+            bonusDP = (amount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
+            quest.dp += bonusDP;
+            totalDisciplinePoints += bonusDP;
+            ranking.registerNewQuest(msg.sender, bonusDP, 0);
         } else {
             quest.currentStreak = 0;
         }
@@ -101,8 +116,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         quest.lastDepositTimestamp = block.timestamp;
 
         _forwardToStrategy(amount);
-        
-        emit DepositExecuted(_questId, amount, inWindow);
+        emit DepositExecuted(_questId, amount, inWindow, bonusDP);
     }
 
     function _forwardToStrategy(uint256 _amount) internal {
@@ -123,6 +137,8 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         }
 
         totalDisciplinePoints -= quest.dp;
+        ranking.reduceActiveDP(msg.sender, quest.dp);
+
         quest.active = false;
         IAOM3Strategy(yieldStrategy).redeemWithFee(totalAmount, penaltyFee, msg.sender);
         emit WithdrawalExecuted(_questId, totalAmount - penaltyFee, quest.dp);
