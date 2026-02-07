@@ -35,6 +35,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     mapping(uint256 => QuestPlan) public quests;
     uint256 public nextQuestId;
     uint256 public totalDisciplinePoints;
+    uint256 private constant SECONDS_PER_MONTH = 2629743;
 
     event QuestCreated(uint256 indexed questId, address indexed owner, uint256 amount, uint256 dp);
     event DepositExecuted(uint256 indexed questId, uint256 amount, bool insideWindow, uint256 bonusDP);
@@ -62,6 +63,11 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     function isInsideWindow() public view returns (bool) {
         uint256 day = getDayOfMonth(block.timestamp);
         return (day >= 1 && day <= 7); 
+    }
+
+    function isNewMonth(uint256 _currentTimestamp, uint256 _lastTimestamp) public pure returns (bool) {
+        if (_lastTimestamp == 0) return true;
+        return (_currentTimestamp / SECONDS_PER_MONTH) > (_lastTimestamp / SECONDS_PER_MONTH);
     }
 
     function createQuest(uint256 _monthlyAmount, uint256 _durationMonths) external nonReentrant {
@@ -94,29 +100,25 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         QuestPlan storage quest = quests[_questId];
         require(quest.active, "Quest not active");
         require(msg.sender == quest.owner, "Not owner");
-        require(block.timestamp > quest.lastDepositTimestamp + 20 days, "Too soon");
+        require(isInsideWindow(), "Not in deposit window (Days 1-7)");
+        require(isNewMonth(block.timestamp, quest.lastDepositTimestamp), "Already deposited this month");
 
         uint256 amount = quest.monthlyAmount;
         require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
-        bool inWindow = isInsideWindow();
-        uint256 bonusDP = 0;
-
-        if (inWindow) {
-            quest.currentStreak++;
-            bonusDP = (amount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
-            quest.dp += bonusDP;
-            totalDisciplinePoints += bonusDP;
-            ranking.registerNewQuest(msg.sender, bonusDP, 0);
-        } else {
-            quest.currentStreak = 0;
-        }
+        quest.currentStreak++;
+        uint256 bonusDP = (amount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
+        
+        quest.dp += bonusDP;
+        totalDisciplinePoints += bonusDP;
+        
+        ranking.registerNewQuest(msg.sender, bonusDP, 0);
 
         quest.totalDeposited += amount;
         quest.lastDepositTimestamp = block.timestamp;
 
         _forwardToStrategy(amount);
-        emit DepositExecuted(_questId, amount, inWindow, bonusDP);
+        emit DepositExecuted(_questId, amount, true, bonusDP);
     }
 
     function _forwardToStrategy(uint256 _amount) internal {
