@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-interface IAOM3Strategy {
-    function deposit(uint256 amount) external;
-    function redeemWithFee(uint256 totalAmount, uint256 feeAmount, address to) external;
+struct Signature {
+    uint256 r;
+    uint256 s;
+    uint8 v;
+}
+
+struct DepositWithPermit {
+    address user;
+    uint64 usd;
+    uint64 deadline;
+    Signature signature;
+}
+
+interface IHyperliquidBridge {
+    function batchedDepositWithPermit(DepositWithPermit[] calldata deposits) external;
 }
 
 interface IAOM3Ranking {
@@ -16,9 +27,9 @@ interface IAOM3Ranking {
 }
 
 contract AOM3Vault is Ownable, ReentrancyGuard {
-    IERC20 public usdc;
-    address public yieldStrategy; 
     IAOM3Ranking public ranking;
+    address public immutable usdc;
+    IHyperliquidBridge public immutable bridge;
 
     struct QuestPlan {
         address owner;
@@ -33,18 +44,21 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     }
 
     mapping(uint256 => QuestPlan) public quests;
+    // ✅ เพิ่มการเก็บยอดเงินสะสมรายคน เพื่อให้ Frontend อ่านค่า virtualBalance ได้ทันที
+    mapping(address => uint256) public userBalance; 
+
     uint256 public nextQuestId;
     uint256 public totalDisciplinePoints;
     uint256 private constant SECONDS_PER_MONTH = 2629743;
 
     event QuestCreated(uint256 indexed questId, address indexed owner, uint256 amount, uint256 dp);
-    event DepositExecuted(uint256 indexed questId, uint256 amount, bool insideWindow, uint256 bonusDP);
-    event WithdrawalExecuted(uint256 indexed questId, uint256 amount, uint256 dpSubtracted);
+    event DepositSynced(uint256 indexed questId, uint256 amount, uint256 bonusDP);
+    event WithdrawalClosed(uint256 indexed questId, uint256 amount, uint256 dpSubtracted);
 
-    constructor(address _usdc, address _yieldStrategy, address _ranking) Ownable(msg.sender) {
-        usdc = IERC20(_usdc);
-        yieldStrategy = _yieldStrategy;
+    constructor(address _ranking, address _usdc, address _bridge) Ownable(msg.sender) {
         ranking = IAOM3Ranking(_ranking);
+        usdc = _usdc;
+        bridge = IHyperliquidBridge(_bridge);
     }
 
     function getMultiplier(uint256 _months) public pure returns (uint256) {
@@ -56,31 +70,36 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         revert("Invalid duration");
     }
 
-    function getDayOfMonth(uint256 timestamp) public pure returns (uint256) {
-        return ((timestamp / 86400 + 3) % 31) + 1; 
-    }
-
     function isInsideWindow() public view returns (bool) {
-        uint256 day = getDayOfMonth(block.timestamp);
+        uint256 day = ((block.timestamp / 86400 + 3) % 31) + 1;
         return (day >= 1 && day <= 7); 
     }
 
-    function isNewMonth(uint256 _currentTimestamp, uint256 _lastTimestamp) public pure returns (bool) {
-        if (_lastTimestamp == 0) return true;
-        return (_currentTimestamp / SECONDS_PER_MONTH) > (_lastTimestamp / SECONDS_PER_MONTH);
-    }
-
-    function createQuest(uint256 _monthlyAmount, uint256 _durationMonths) external nonReentrant {
-        uint256 multiplier = getMultiplier(_durationMonths);
+    function createQuestWithPermit(
+        uint64 _monthlyAmount, 
+        uint256 _durationMonths,
+        uint64 _deadline,
+        uint8 v, bytes32 r, bytes32 s
+    ) external nonReentrant {
         require(_monthlyAmount > 0, "Amount must be > 0");
-        require(usdc.transferFrom(msg.sender, address(this), _monthlyAmount), "First deposit failed");
-        uint256 questDP = (_monthlyAmount * _durationMonths * multiplier) / (100 * 1e6);
+
+        DepositWithPermit[] memory deposits = new DepositWithPermit[](1);
+        deposits[0] = DepositWithPermit({
+            user: msg.sender,
+            usd: _monthlyAmount,
+            deadline: _deadline,
+            signature: Signature({ r: uint256(r), s: uint256(s), v: v })
+        });
+
+        bridge.batchedDepositWithPermit(deposits);
+        uint256 multiplier = getMultiplier(_durationMonths);
+        uint256 questDP = (uint256(_monthlyAmount) * _durationMonths * multiplier) / (100 * 1e6);
 
         uint256 questId = nextQuestId++;
         quests[questId] = QuestPlan({
             owner: msg.sender,
-            monthlyAmount: _monthlyAmount,
-            totalDeposited: _monthlyAmount,
+            monthlyAmount: uint256(_monthlyAmount),
+            totalDeposited: uint256(_monthlyAmount),
             currentStreak: 1,
             durationMonths: _durationMonths,
             startTimestamp: block.timestamp,
@@ -89,41 +108,46 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
             active: true
         });
 
+        userBalance[msg.sender] += uint256(_monthlyAmount);
         totalDisciplinePoints += questDP;
         ranking.registerNewQuest(msg.sender, questDP, _durationMonths);
 
-        _forwardToStrategy(_monthlyAmount);
-        emit QuestCreated(questId, msg.sender, _monthlyAmount, questDP);
+        emit QuestCreated(questId, msg.sender, uint256(_monthlyAmount), questDP);
     }
 
-    function deposit(uint256 _questId) external nonReentrant {
+    function depositWithPermit(
+        uint256 _questId,
+        uint64 _deadline,
+        uint8 v, bytes32 r, bytes32 s
+    ) external nonReentrant {
         QuestPlan storage quest = quests[_questId];
         require(quest.active, "Quest not active");
         require(msg.sender == quest.owner, "Not owner");
-        require(isInsideWindow(), "Not in deposit window (Days 1-7)");
-        require(isNewMonth(block.timestamp, quest.lastDepositTimestamp), "Already deposited this month");
+        require(isInsideWindow(), "Not in window");
+        require((block.timestamp / SECONDS_PER_MONTH) > (quest.lastDepositTimestamp / SECONDS_PER_MONTH), "Already synced");
+        uint64 amountToDeposit = uint64(quest.monthlyAmount);
 
-        uint256 amount = quest.monthlyAmount;
-        require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
+        DepositWithPermit[] memory deposits = new DepositWithPermit[](1);
+        deposits[0] = DepositWithPermit({
+            user: msg.sender,
+            usd: amountToDeposit,
+            deadline: _deadline,
+            signature: Signature({ r: uint256(r), s: uint256(s), v: v })
+        });
+        bridge.batchedDepositWithPermit(deposits);
 
         quest.currentStreak++;
-        uint256 bonusDP = (amount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
+        uint256 bonusDP = (quest.monthlyAmount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
         
         quest.dp += bonusDP;
         totalDisciplinePoints += bonusDP;
-        
+        userBalance[msg.sender] += uint256(amountToDeposit);
         ranking.registerNewQuest(msg.sender, bonusDP, 0);
 
-        quest.totalDeposited += amount;
+        quest.totalDeposited += quest.monthlyAmount;
         quest.lastDepositTimestamp = block.timestamp;
 
-        _forwardToStrategy(amount);
-        emit DepositExecuted(_questId, amount, true, bonusDP);
-    }
-
-    function _forwardToStrategy(uint256 _amount) internal {
-        usdc.approve(yieldStrategy, _amount);
-        IAOM3Strategy(yieldStrategy).deposit(_amount);
+        emit DepositSynced(_questId, quest.monthlyAmount, bonusDP);
     }
 
     function withdraw(uint256 _questId) external nonReentrant {
@@ -131,18 +155,11 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         require(msg.sender == quest.owner, "Not owner");
         require(quest.active, "Quest not active");
 
-        uint256 totalAmount = quest.totalDeposited;
-        uint256 penaltyFee = 0;
-
-        if (block.timestamp < quest.startTimestamp + (quest.durationMonths * 30 days)) {
-            penaltyFee = (totalAmount * 10) / 100;
-        }
-
         totalDisciplinePoints -= quest.dp;
         ranking.reduceActiveDP(msg.sender, quest.dp);
+        userBalance[msg.sender] -= quest.totalDeposited;
 
         quest.active = false;
-        IAOM3Strategy(yieldStrategy).redeemWithFee(totalAmount, penaltyFee, msg.sender);
-        emit WithdrawalExecuted(_questId, totalAmount - penaltyFee, quest.dp);
+        emit WithdrawalClosed(_questId, quest.totalDeposited, quest.dp);
     }
 }
