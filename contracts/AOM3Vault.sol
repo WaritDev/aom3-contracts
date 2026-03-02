@@ -3,6 +3,9 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol"; 
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 struct Signature {
     uint256 r;
@@ -30,6 +33,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     IAOM3Ranking public ranking;
     address public immutable usdc;
     IHyperliquidBridge public immutable bridge;
+    address public rewardDistributor;
 
     struct QuestPlan {
         address owner;
@@ -44,7 +48,6 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
     }
 
     mapping(uint256 => QuestPlan) public quests;
-    // ✅ เพิ่มการเก็บยอดเงินสะสมรายคน เพื่อให้ Frontend อ่านค่า virtualBalance ได้ทันที
     mapping(address => uint256) public userBalance; 
 
     uint256 public nextQuestId;
@@ -59,6 +62,11 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         ranking = IAOM3Ranking(_ranking);
         usdc = _usdc;
         bridge = IHyperliquidBridge(_bridge);
+    }
+
+    function setRewardDistributor(address _distributor) external onlyOwner {
+        require(_distributor != address(0), "Invalid address");
+        rewardDistributor = _distributor;
     }
 
     function getMultiplier(uint256 _months) public pure returns (uint256) {
@@ -154,12 +162,24 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         QuestPlan storage quest = quests[_questId];
         require(msg.sender == quest.owner, "Not owner");
         require(quest.active, "Quest not active");
+        uint256 totalAmount = quest.totalDeposited;
+        uint256 maturityDate = quest.startTimestamp + (quest.durationMonths * SECONDS_PER_MONTH);
+        require(IERC20(usdc).transferFrom(msg.sender, address(this), totalAmount), "Transfer from user failed");
+
+        if (block.timestamp < maturityDate) {
+            uint256 penalty = (totalAmount * 10) / 100;
+            uint256 userReturn = totalAmount - penalty;
+
+            require(IERC20(usdc).transfer(rewardDistributor, penalty), "Penalty transfer failed");
+            require(IERC20(usdc).transfer(msg.sender, userReturn), "User transfer failed");
+        } else {
+            require(IERC20(usdc).transfer(msg.sender, totalAmount), "Full transfer failed");
+        }
 
         totalDisciplinePoints -= quest.dp;
         ranking.reduceActiveDP(msg.sender, quest.dp);
-        userBalance[msg.sender] -= quest.totalDeposited;
-
+        userBalance[msg.sender] -= totalAmount;
         quest.active = false;
-        emit WithdrawalClosed(_questId, quest.totalDeposited, quest.dp);
+        emit WithdrawalClosed(_questId, totalAmount, quest.dp);
     }
 }

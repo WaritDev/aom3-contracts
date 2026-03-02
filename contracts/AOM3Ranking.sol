@@ -11,6 +11,14 @@ contract AOM3Ranking is Ownable {
         uint256 totalMonths;
     }
 
+    struct LeaderboardEntry {
+        address userAddress;
+        uint256 lifetimeDP;
+        uint256 currentActiveDP;
+        uint256 totalQuests;
+        uint256 totalMonths;
+    }
+
     address public vault;
     mapping(address => UserStats) public userStats;
     address[] public allParticipants;
@@ -62,5 +70,23 @@ contract AOM3Ranking is Ownable {
 
     function getTotalParticipants() external view returns (uint256) {
         return allParticipants.length;
+    }
+
+    function getAllLeaderboard() external view returns (LeaderboardEntry[] memory) {
+        uint256 count = allParticipants.length;
+        LeaderboardEntry[] memory entries = new LeaderboardEntry[](count);
+
+        for (uint256 i = 0; i < count; i++) {
+            address user = allParticipants[i];
+            UserStats storage stats = userStats[user];
+            entries[i] = LeaderboardEntry({
+                userAddress: user,
+                lifetimeDP: stats.lifetimeDP,
+                currentActiveDP: stats.currentActiveDP,
+                totalQuests: stats.totalQuests,
+                totalMonths: stats.totalMonths
+            });
+        }
+        return entries;
     }
 }

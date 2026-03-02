@@ -21,9 +21,7 @@ contract AOM3RewardDistributor is Ownable, ReentrancyGuard {
     uint256 public lastSnapshotAmount;
     uint256 public lastSnapshotDay;
 
-    // บันทึกว่า Quest ID นี้เบิกรางวัลของรอบวันนี้ไปหรือยัง
     mapping(uint256 => mapping(uint256 => bool)) public hasClaimed;
-
     event RewardReceived(address indexed from, uint256 amount);
     event RewardClaimed(uint256 indexed questId, address indexed to, uint256 amount);
 
