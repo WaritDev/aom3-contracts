@@ -55,6 +55,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
     event QuestCreated(uint256 indexed questId, address indexed owner, uint256 amount, uint256 dp);
     event DepositSynced(uint256 indexed questId, uint256 amount, uint256 bonusDP);
     event WithdrawalClosed(uint256 indexed questId, uint256 amount, uint256 dpSubtracted);
+    event QuestDPBurned(uint256 indexed questId, address indexed owner, uint256 dpBurned);
 
     constructor(address _ranking, address _usdc, address _bridge) Ownable(msg.sender) {
         ranking = IAOM3Ranking(_ranking);
@@ -125,7 +126,6 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         QuestPlan storage quest = quests[_questId];
         require(quest.active, "Quest not active");
         require(msg.sender == quest.owner, "Not owner");
-        // require((block.timestamp / SECONDS_PER_MONTH) > (quest.lastDepositTimestamp / SECONDS_PER_MONTH), "Already synced this month");
         uint64 amountToDeposit = uint64(quest.monthlyAmount);
 
         DepositWithPermit[] memory deposits = new DepositWithPermit[](1);
@@ -173,15 +173,37 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
 
             require(IERC20(usdc).transfer(rewardDistributor, penalty), "Penalty transfer failed");
             require(IERC20(usdc).transfer(msg.sender, userReturn), "User transfer failed");
+
+            uint256 burnedDP = quest.dp;
+            totalDisciplinePoints -= burnedDP;
+            ranking.reduceActiveDP(msg.sender, burnedDP);
+            quest.dp = 0;
+            
+            emit WithdrawalClosed(_questId, totalAmount, burnedDP);
         } else {
             require(IERC20(usdc).transfer(msg.sender, totalAmount), "Full transfer failed");
+            emit WithdrawalClosed(_questId, totalAmount, 0);
         }
 
-        totalDisciplinePoints -= quest.dp;
-        ranking.reduceActiveDP(msg.sender, quest.dp);
         userBalance[msg.sender] -= totalAmount;
         quest.active = false;
+    }
+
+    function getQuestDP(uint256 _questId) external view returns (uint256) {
+        return quests[_questId].dp;
+    }
+
+    function burnQuestDP(uint256 _questId) external {
+        require(msg.sender == rewardDistributor, "Only distributor can burn DP");
+        QuestPlan storage quest = quests[_questId];
         
-        emit WithdrawalClosed(_questId, totalAmount, quest.dp);
+        uint256 dpToBurn = quest.dp;
+        require(dpToBurn > 0, "No DP to burn");
+
+        totalDisciplinePoints -= dpToBurn;
+        ranking.reduceActiveDP(quest.owner, dpToBurn);
+        quest.dp = 0;
+
+        emit QuestDPBurned(_questId, quest.owner, dpToBurn);
     }
 }

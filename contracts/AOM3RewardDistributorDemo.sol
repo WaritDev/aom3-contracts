@@ -12,16 +12,13 @@ interface IAOM3Vault {
         uint256 currentStreak, uint256 durationMonths, uint256 startTimestamp,
         uint256 lastDepositTimestamp, uint256 dp, bool active
     );
+    function burnQuestDP(uint256 _questId) external; 
 }
 
 contract AOM3RewardDistributorDemo is Ownable, ReentrancyGuard {
     IERC20 public usdc;
     IAOM3Vault public vault;
 
-    uint256 public lastSnapshotAmount;
-    uint256 public lastSnapshotDay;
-
-    mapping(uint256 => mapping(uint256 => bool)) public hasClaimed;
     event RewardReceived(address indexed from, uint256 amount);
     event RewardClaimed(uint256 indexed questId, address indexed to, uint256 amount);
 
@@ -36,25 +33,22 @@ contract AOM3RewardDistributorDemo is Ownable, ReentrancyGuard {
     }
 
     function claimReward(uint256 _questId) external nonReentrant {
-        uint256 epochDay = block.timestamp / 86400;
-        require(!hasClaimed[_questId][epochDay], "Already claimed for this round (today)");
-
-        (address owner,,,,,,, uint256 userDP, bool active) = vault.quests(_questId);
+        (address owner,,,,,,, uint256 userDP, ) = vault.quests(_questId);
+        
         require(msg.sender == owner, "Not quest owner");
-        require(active, "Quest must be active to earn rewards");
-
-        if (epochDay > lastSnapshotDay) {
-            lastSnapshotAmount = usdc.balanceOf(address(this));
-            lastSnapshotDay = epochDay;
-        }
+        require(userDP > 0, "No Active DP to claim");
 
         uint256 totalDP = vault.totalDisciplinePoints();
         require(totalDP > 0, "No DP in system");
 
-        uint256 rewardAmount = (lastSnapshotAmount * userDP) / totalDP;
+        uint256 currentPoolBalance = usdc.balanceOf(address(this));
+        require(currentPoolBalance > 0, "Reward pool is empty");
+
+        uint256 rewardAmount = (currentPoolBalance * userDP) / totalDP;
         require(rewardAmount > 0, "No rewards available for your DP share");
 
-        hasClaimed[_questId][epochDay] = true;
+        vault.burnQuestDP(_questId);
+
         require(usdc.transfer(owner, rewardAmount), "Reward transfer failed");
 
         emit RewardClaimed(_questId, owner, rewardAmount);

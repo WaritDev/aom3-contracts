@@ -43,8 +43,11 @@ contract AOM3Ranking is Ownable {
         
         stats.lifetimeDP += _dp;
         stats.currentActiveDP += _dp;
-        stats.totalQuests += 1;
-        stats.totalMonths += _months;
+        
+        if (_months > 0) {
+            stats.totalQuests += 1;
+            stats.totalMonths += _months;
+        }
 
         if (!hasJoined[_user]) {
             allParticipants.push(_user);
