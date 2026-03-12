@@ -162,12 +162,16 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         QuestPlan storage quest = quests[_questId];
         require(msg.sender == quest.owner, "Not owner");
         require(quest.active, "Quest not active");
+
         uint256 totalAmount = quest.totalDeposited;
-        uint256 maturityDate = quest.startTimestamp + (quest.durationMonths * SECONDS_PER_MONTH);
+        uint256 totalDurationSec = quest.durationMonths * SECONDS_PER_MONTH;
+        uint256 maturityDate = quest.startTimestamp + totalDurationSec;
         require(IERC20(usdc).transferFrom(msg.sender, address(this), totalAmount), "Transfer from user failed");
 
         if (block.timestamp < maturityDate) {
-            uint256 penalty = (totalAmount * 10) / 100;
+            uint256 remainingSec = maturityDate - block.timestamp;
+            uint256 penaltyBps = 200 + ((remainingSec * 300) / totalDurationSec);
+            uint256 penalty = (totalAmount * penaltyBps) / 10000;
             uint256 userReturn = totalAmount - penalty;
 
             require(IERC20(usdc).transfer(rewardDistributor, penalty), "Penalty transfer failed");
@@ -180,6 +184,7 @@ contract AOM3Vault is Ownable, ReentrancyGuard {
         ranking.reduceActiveDP(msg.sender, quest.dp);
         userBalance[msg.sender] -= totalAmount;
         quest.active = false;
+        
         emit WithdrawalClosed(_questId, totalAmount, quest.dp);
     }
 }
