@@ -167,7 +167,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
 
         if (!isMaturedByTime && !isMaturedByStreak) {
             uint256 remainingSec = maturityDate - block.timestamp;
-            uint256 penaltyBps = 200 + ((remainingSec * 300) / totalDurationSec);
+            uint256 penaltyBps = 100 + ((remainingSec * 200) / totalDurationSec);
             uint256 penalty = (totalAmount * penaltyBps) / 10000;
             uint256 userReturn = totalAmount - penalty;
 
