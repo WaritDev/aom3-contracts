@@ -156,7 +156,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         QuestPlan storage quest = quests[_questId];
         require(msg.sender == quest.owner, "Not owner");
         require(quest.active, "Quest not active");
-
+        require(quest.totalDeposited > 0, "Already withdrawn");
         uint256 totalAmount = quest.totalDeposited;
         uint256 totalDurationSec = quest.durationMonths * SECONDS_PER_MONTH;
         uint256 maturityDate = quest.startTimestamp + totalDurationSec;
@@ -178,6 +178,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
             totalDisciplinePoints -= burnedDP;
             ranking.reduceActiveDP(msg.sender, burnedDP);
             quest.dp = 0;
+            quest.active = false;
             
             emit WithdrawalClosed(_questId, totalAmount, burnedDP);
         } else {
@@ -186,7 +187,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         }
 
         userBalance[msg.sender] -= totalAmount;
-        quest.active = false;
+        quest.totalDeposited = 0;
     }
 
     function getQuestDP(uint256 _questId) external view returns (uint256) {
