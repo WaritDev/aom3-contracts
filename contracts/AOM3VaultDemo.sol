@@ -77,6 +77,12 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         revert("Invalid duration");
     }
 
+    function calculateMonthlyDP(uint256 _amount, uint256 _duration, uint256 _streak) public pure returns (uint256) {
+        uint256 planMultiplier = getMultiplier(_duration); 
+        uint256 streakMultiplier = 100 + (_streak * 10);
+        return (_amount * planMultiplier * streakMultiplier) / (10000 * 1e6);
+    }
+
     function createQuestWithPermit(
         uint64 _monthlyAmount, 
         uint256 _durationMonths,
@@ -94,9 +100,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         });
 
         bridge.batchedDepositWithPermit(deposits);
-        
-        uint256 multiplier = getMultiplier(_durationMonths);
-        uint256 questDP = (uint256(_monthlyAmount) * _durationMonths * multiplier) / (100 * 1e6);
+        uint256 questDP = calculateMonthlyDP(uint256(_monthlyAmount), _durationMonths, 1);
 
         uint256 questId = nextQuestId++;
         quests[questId] = QuestPlan({
@@ -139,7 +143,7 @@ contract AOM3VaultDemo is Ownable, ReentrancyGuard {
         bridge.batchedDepositWithPermit(deposits);
 
         quest.currentStreak++;
-        uint256 bonusDP = (quest.monthlyAmount * getMultiplier(quest.durationMonths)) / (100 * 1e6);
+        uint256 bonusDP = calculateMonthlyDP(quest.monthlyAmount, quest.durationMonths, quest.currentStreak);
         
         quest.dp += bonusDP;
         totalDisciplinePoints += bonusDP;
